@@ -1,0 +1,8 @@
+.bam/*
+.vs/*
+*.vcxproj
+*.vcxproj.user
+local/*
+*.sln
+x64/*
+*.swp
