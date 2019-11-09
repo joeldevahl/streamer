@@ -47,12 +47,19 @@ struct resource_t
 
 #define NUM_RESOURCES 256
 
-TEST(streamer, create_destroy) {
+TEST(streamer, create_destroy)
+{
+	streamer_path_info_t path0 = {};
+	path0.path = "d:\\streamer";
+
+	streamer_space_info_t space0 = {};
+	space0.address_space_size = 0x0000010000000000ULL;
+	space0.num_paths = 1;
+	space0.paths = &path0;
+
 	streamer_create_info_t create_info = {};
 	create_info.flags = STREAMER_CREATE_FLAGS_CLEAN_ON_CREATE;
-	create_info.path = "d:\\streamer";
-	create_info.address_space_size = 0x0000010000000000ULL;
-	create_info.page_padding_multiplier = 10;
+	create_info.allocation_padding_multiplier = 10;
 
 	streamer_t* streamer;
 	streamer_result_t res = streamer_create(&create_info, &streamer);
@@ -64,12 +71,19 @@ TEST(streamer, create_destroy) {
 
 TEST(streamer, resize_recreate)
 {
-	streamer_t* streamer;
+	streamer_path_info_t path0 = {};
+	path0.path = "d:\\streamer";
+
+	streamer_space_info_t space0 = {};
+	space0.address_space_size = 0x0000010000000000ULL;
+	space0.num_paths = 1;
+	space0.paths = &path0;
+
 	streamer_create_info_t create_info = {};
 	create_info.flags = STREAMER_CREATE_FLAGS_CLEAN_ON_CREATE;
-	create_info.path = "d:\\streamer";
-	create_info.address_space_size = 0x0000010000000000ULL;
-	create_info.page_padding_multiplier = 10;
+	create_info.allocation_padding_multiplier = 10;
+
+	streamer_t* streamer;
 	streamer_result_t res = streamer_create(&create_info, &streamer);
 	ASSERT_EQ(res, STREAMER_RESULT_OK);
 
@@ -78,7 +92,7 @@ TEST(streamer, resize_recreate)
 	resource_t* ptrs[NUM_RESOURCES];
 	for (int i = 0; i < NUM_RESOURCES; ++i)
 	{
-		res = streamer_allocate_resource(streamer, size, &resource_ids[i], (void**)&ptrs[i]);
+		res = streamer_allocate_resource(streamer, 0, size, &resource_ids[i], (void**)&ptrs[i]);
 		ASSERT_EQ(res, STREAMER_RESULT_OK);
 	}
 
@@ -106,7 +120,7 @@ TEST(streamer, resize_recreate)
 	res = streamer_destroy(streamer);
 	ASSERT_EQ(res, STREAMER_RESULT_OK);
 
-	create_info.flags = 0;
+	create_info.flags = STREAMER_CREATE_FLAGS_NONE;
 	res = streamer_create(&create_info, &streamer);
 	ASSERT_EQ(res, STREAMER_RESULT_OK);
 
