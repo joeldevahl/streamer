@@ -4,7 +4,7 @@ Unit:Using("jc_test")
 
 function Unit.Init(self)
 	self.executable = true
-	self.targetname = "streamer"
+	self.targetname = "test"
 end
 
 function Unit.Build(self)

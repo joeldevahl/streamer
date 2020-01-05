@@ -1,6 +1,13 @@
-#define _CRT_SECURE_NO_WARNINGS
+#if defined(FAMILY_WINDOWS)
+#	define _CRT_SECURE_NO_WARNINGS
+#	pragma warning(disable : 4200) // empty array at end of struct
+#	define BASE_PATH  "d:\\streamer"
+#elif defined(FAMILY_UNIX)
+#	define BASE_PATH  "/Users/joel/Code/streamer/local/streamer"
+#endif
 
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
 #include "streamer.h"
 
@@ -29,7 +36,7 @@ public:
 
 	offset_ptr<T>& operator=(const offset_ptr &other) {
 		diff = (ptrdiff_t)other.get() - (ptrdiff_t)this;
-		return *this
+		return *this;
 	}
 
 	offset_ptr<T>& operator=(const T* ptr) {
@@ -38,7 +45,6 @@ public:
 	}
 };
 
-#pragma warning(disable : 4200)
 struct resource_t
 {
 	offset_ptr<resource_t> next;
@@ -50,7 +56,7 @@ struct resource_t
 TEST(streamer, create_destroy)
 {
 	streamer_path_info_t path0 = {};
-	path0.path = "d:\\streamer";
+	path0.path = BASE_PATH;
 
 	streamer_space_info_t space0 = {};
 	space0.address_space_size = 0x0000010000000000ULL;
@@ -58,6 +64,8 @@ TEST(streamer, create_destroy)
 	space0.paths = &path0;
 
 	streamer_create_info_t create_info = {};
+	create_info.num_spaces = 1;
+	create_info.spaces = &space0;
 	create_info.flags = STREAMER_CREATE_FLAGS_CLEAN_ON_CREATE;
 	create_info.allocation_padding_multiplier = 10;
 
@@ -72,7 +80,7 @@ TEST(streamer, create_destroy)
 TEST(streamer, resize_recreate)
 {
 	streamer_path_info_t path0 = {};
-	path0.path = "d:\\streamer";
+	path0.path = BASE_PATH;
 
 	streamer_space_info_t space0 = {};
 	space0.address_space_size = 0x0000010000000000ULL;
@@ -80,7 +88,9 @@ TEST(streamer, resize_recreate)
 	space0.paths = &path0;
 
 	streamer_create_info_t create_info = {};
-	create_info.flags = STREAMER_CREATE_FLAGS_CLEAN_ON_CREATE;
+    create_info.num_spaces = 1;
+    create_info.spaces = &space0;
+    create_info.flags = STREAMER_CREATE_FLAGS_CLEAN_ON_CREATE;
 	create_info.allocation_padding_multiplier = 10;
 
 	streamer_t* streamer;

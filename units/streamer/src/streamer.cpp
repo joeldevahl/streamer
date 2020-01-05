@@ -1,9 +1,25 @@
-#define _CRT_SECURE_NO_WARNINGS
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#if defined(PLATFORM_WINDOWS)
+#	define _CRT_SECURE_NO_WARNINGS
+#	define WIN32_LEAN_AND_MEAN
+#	define NOMINMAX
+#	include <windows.h>
+#	pragma warning(disable : 4200) // empty array at end of struct
+#	define strdup _strdup
+#	define PATH_SEPARATOR "\\"
+#elif defined(FAMILY_UNIX)
+#	include <sys/types.h>
+#	include <sys/mman.h>
+#	include <sys/stat.h>
+#	include <fcntl.h>
+#	include <unistd.h>
+#	include <errno.h>
+#	define MAX_PATH 1024
+#	define PATH_SEPARATOR "/"
+#else
+#	error "Not implemented for this system"
+#endif
 
-#include <streamer.h>
+#include "streamer.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +33,6 @@ struct streamer_resource_info_t
 	size_t capacity;
 };
 
-#pragma warning(disable : 4200)
 struct streamer_page_map_t
 {
 	size_t page_size;
@@ -45,8 +60,13 @@ struct streamer_space_t
 	streamer_resource_status_t* resource_statuses;
 	size_t* resource_to_path;
 
+#if defined(PLATFORM_WINDOWS)
 	HANDLE page_map_file;
 	HANDLE page_map_file_mapping;
+#elif defined(FAMILY_UNIX)
+	size_t page_map_size;
+	int page_map_file;
+#endif
 };
 
 struct streamer_t
@@ -68,11 +88,7 @@ streamer_result_t streamer_create(const streamer_create_info_t* create_info, str
 	streamer->creation_flags = create_info->flags;
 	streamer->allocation_padding_multiplier = create_info->allocation_padding_multiplier;
 
-	// Get system info since we need to know about allocation granularity
-	// We use this granularity as a allocation "page"
-	SYSTEM_INFO sysinfo;
-	GetSystemInfo(&sysinfo);
-	size_t page_size = sysinfo.dwAllocationGranularity;
+	size_t page_size = 64 * 1024 * 1024;
 
 	streamer->num_spaces = create_info->num_spaces;
 	streamer->spaces = (streamer_space_t*)malloc(streamer->num_spaces * sizeof(streamer_space_t));
@@ -93,24 +109,32 @@ streamer_result_t streamer_create(const streamer_create_info_t* create_info, str
 			streamer_path_t* path = &space->paths[ip];
 			const streamer_path_info_t* path_info = &space_info->paths[ip];
 
-			path->path = _strdup(path_info->path);
+			path->path = strdup(path_info->path);
 
 			// TODO: we should be able to nuke just _some_ directories
 			if (create_info->flags & STREAMER_CREATE_FLAGS_CLEAN_ON_CREATE)
 			{
-				std::experimental::filesystem::remove_all(path->path);
-				CreateDirectory(path->path, NULL);
+				std::__fs::filesystem::remove_all(path->path);
+				std::__fs::filesystem::create_directory(path->path);
 			}
 		}
 
+#if defined(PLATFORM_WINDOWS)
 		space->base_ptr = (uint8_t*)VirtualAlloc(NULL, space->address_space_size, MEM_RESERVE, PAGE_READWRITE);
+#elif defined(FAMILY_UNIX)
+		space->base_ptr = (uint8_t*)mmap(NULL, space->address_space_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,  0, 0);
+#endif
 		if (space->base_ptr == NULL)
 			return STREAMER_RESULT_GENERIC_ERROR; // TODO: rollback and free what was already allocated;
 
 		// Setup page map
 		char name[MAX_PATH];
-		sprintf(name, "%s\\page_map.dat", space->paths[0].path);
+		sprintf(name, "%s" PATH_SEPARATOR "page_map.dat", space->paths[0].path);
+#if defined(PLATFORM_WINDOWS)
 		space->page_map_file = CreateFile(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+#elif defined(FAMILY_UNIX)
+		space->page_map_file = open(name, O_RDWR | O_CREAT);
+#endif
 
 		size_t size = 0;
 		size_t num_pages = 0;
@@ -124,20 +148,35 @@ streamer_result_t streamer_create(const streamer_create_info_t* create_info, str
 			size = num_pages * page_size;
 			if (streamer->allocation_padding_multiplier > 0)
 				num_pages *= streamer->allocation_padding_multiplier;
+#if defined(FAMILY_UNIX)
+			lseek(space->page_map_file, size-1, SEEK_SET);
+			write(space->page_map_file, "", 1);
+#endif
 		}
 		else
 		{
 			// We are not resetting so we just get the size to map from the file
+#if defined(PLATFORM_WINDOWS)
 			DWORD size_high = 0;
 			DWORD size_low = GetFileSize(space->page_map_file, &size_high);
 			size = (size_t)size_low + (((size_t)size_high) << 32);
+#elif defined(FAMILY_UNIX)
+			struct stat st;
+			fstat(space->page_map_file, &st);
+			size = st.st_size;
+#endif
 			num_pages = (size + page_size - 1) / page_size;
 		}
 
+#if defined(PLATFORM_WINDOWS)
 		DWORD size_low = (DWORD)size;
 		DWORD size_high = (DWORD)(size >> 32);
 		space->page_map_file_mapping = CreateFileMapping(space->page_map_file, NULL, PAGE_READWRITE, size_high, size_low, NULL);
 		void* mem = MapViewOfFileEx(space->page_map_file_mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size, NULL);
+#elif defined(FAMILY_UNIX)
+		space->page_map_size = size;
+		void* mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_FILE, space->page_map_file, 0);
+#endif
 
 		space->page_map = (streamer_page_map_t*)mem;
 		if (create_info->flags & STREAMER_CREATE_FLAGS_CLEAN_ON_CREATE)
@@ -172,10 +211,15 @@ streamer_result_t streamer_destroy(streamer_t* streamer)
 		free(space->paths);
 		free(space->resource_statuses);
 		free(space->resource_to_path);
+#if defined(PLATFORM_WINDOWS)
 		UnmapViewOfFile(space->page_map);
 		CloseHandle(space->page_map_file_mapping);
 		CloseHandle(space->page_map_file);
 		VirtualFree(space->base_ptr, space->address_space_size, MEM_RELEASE);
+#elif defined(FAMILY_UNIX)
+		munmap(space->page_map, space->page_map_size);
+		munmap(space->base_ptr, space->address_space_size);
+#endif
 	}
 	free(streamer->spaces);
 	free(streamer);
@@ -228,18 +272,34 @@ streamer_result_t streamer_load_resource(streamer_t* streamer, streamer_resource
 	for (int i = space->num_paths - 1; i >= 0 && res != STREAMER_RESULT_OK; --i)
 	{
 		char name[MAX_PATH];
-		sprintf(name, "%s\\0x%016" PRIx64 ".dat", space->paths[i].path, resource_id.id);
+		sprintf(name, "%s" PATH_SEPARATOR "0x%016" PRIx64 ".dat", space->paths[i].path, resource_id.id);
 
+#if defined(FAMILY_WINDOWS)
 		HANDLE file = CreateFile(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (file != INVALID_HANDLE_VALUE)
+#elif defined(FAMILY_UNIX)
+		int file = open(name, O_RDONLY);
+		if(file != 0)
+#endif
 		{
+#if defined(FAMILY_WINDOWS)
 			HANDLE file_mapping = CreateFileMapping(file, NULL, PAGE_READWRITE, 0, 0, NULL);
 			if (file_mapping != NULL)
+#endif
 			{
+#if defined(FAMILY_WINDOWS)
 				void* src = MapViewOfFileEx(file_mapping, FILE_MAP_READ, 0, 0, info->size, NULL);
+#elif defined(FAMILY_UNIX)
+				void* src = mmap(NULL, info->size, PROT_READ, MAP_FILE, file, 0);
+#endif
 				if (src != NULL)
 				{
+#if defined(FAMILY_WINDOWS)
 					void* dst = VirtualAlloc(space->base_ptr + resource_id.id, info->size, MEM_COMMIT, PAGE_READWRITE);
+#elif defined(FAMILY_UNIX)
+					void* dst = space->base_ptr + resource_id.id;
+					mprotect(dst, info->size, PROT_READ | PROT_WRITE);
+#endif
 					if (dst != NULL)
 					{
 						memcpy(dst, src, info->size);
@@ -248,11 +308,22 @@ streamer_result_t streamer_load_resource(streamer_t* streamer, streamer_resource
 						space->resource_to_path[index] = i;
 						res = STREAMER_RESULT_OK;
 					}
+#if defined(FAMILY_WINDOWS)
 					UnmapViewOfFile(src);
+#elif defined(FAMILY_UNIX)
+					munmap(src, info->size);
+#endif
 				}
+
+#if defined(FAMILY_WINDOWS)
 				CloseHandle(file_mapping);
+#endif
 			}
+#if defined(FAMILY_WINDOWS)
 			CloseHandle(file);
+#elif defined(FAMILY_UNIX)
+			close(file);
+#endif
 		}
 	}
 
@@ -269,7 +340,11 @@ streamer_result_t streamer_free_resource(streamer_t* streamer, streamer_resource
 	size_t index = streamer_resource_info_to_index(space, info);
 	if(space->resource_statuses[index] != STREAMER_RESOURCE_STATUS_NON_RESIDENT)
 	{
+#if defined(FAMILY_WINDOWS)
 		VirtualFree(space->base_ptr + resource_id.id, info->size, MEM_DECOMMIT);
+#elif defined(FAMILY_UNIX)
+		mprotect(space->base_ptr + resource_id.id, info->size, PROT_NONE);
+#endif
 		space->resource_statuses[index] = STREAMER_RESOURCE_STATUS_NON_RESIDENT;
 	}
 
@@ -294,7 +369,12 @@ streamer_result_t streamer_allocate_resource(streamer_t* streamer, uint8_t space
 	size_t capacity = num_pages * space->page_map->page_size;
 	space->page_map->allocation_offset += capacity;
 
+#if defined(FAMILY_WINDOWS)
 	void* mem = VirtualAlloc(space->base_ptr + resource_id.id, size, MEM_COMMIT, PAGE_READWRITE);
+#elif defined(FAMILY_UNIX)
+	void* mem = space->base_ptr + resource_id.id;
+	mprotect(mem, size, PROT_READ | PROT_WRITE);
+#endif
 	if(mem == NULL)
 		return STREAMER_RESULT_GENERIC_ERROR;
 
@@ -325,7 +405,11 @@ streamer_result_t streamer_delete_resource(streamer_t* streamer, size_t size, st
 	size_t index = streamer_resource_info_to_index(space, info);
 	size_t path_index = space->resource_to_path[index];
 
+#if defined(FAMILY_WINDOWS)
 	VirtualFree(space->base_ptr + resource_id.id, info->size, MEM_DECOMMIT);
+#elif defined(FAMILY_UNIX)
+		mprotect(space->base_ptr + resource_id.id, info->size, PROT_NONE);
+#endif
 
 	size_t num_to_move = space->page_map->info_count - index - 1;
 	memmove(&space->page_map->infos[index], &space->page_map->infos[index + 1], sizeof(streamer_resource_info_t) * num_to_move);
@@ -336,7 +420,7 @@ streamer_result_t streamer_delete_resource(streamer_t* streamer, size_t size, st
 
 	char name[MAX_PATH];
 	sprintf(name, "%s\\0x%016" PRIx64 ".dat", space->paths[path_index].path, resource_id.id);
-	std::experimental::filesystem::remove(name);
+	std::__fs::filesystem::remove(name);
 
 	return STREAMER_RESULT_OK;
 }
@@ -357,7 +441,12 @@ streamer_result_t streamer_grow_resource(streamer_t* streamer, size_t new_size, 
 	size_t num_pages = (new_size + space->page_map->page_size - 1) / space->page_map->page_size;
 	new_size = num_pages * space->page_map->page_size;
 
+#if defined(FAMILY_WINDOWS)
 	void* mem = VirtualAlloc(space->base_ptr + resource_id.id, new_size, MEM_COMMIT, PAGE_READWRITE);
+#elif defined(FAMILY_UNIX)
+	void* mem = space->base_ptr + resource_id.id;
+	mprotect(mem, info->size, PROT_READ | PROT_WRITE);
+#endif
 	assert(mem == space->base_ptr + resource_id.id);
 
 	info->size = new_size;
@@ -373,29 +462,50 @@ static streamer_result_t streamer_flush_to_disk_internal(streamer_space_t* space
 	size_t path_index = space->resource_to_path[index];
 
 	char name[MAX_PATH];
-	sprintf(name, "%s\\0x%016" PRIx64 ".dat", space->paths[path_index].path, info->id.id);
+	sprintf(name, "%s" PATH_SEPARATOR "0x%016" PRIx64 ".dat", space->paths[path_index].path, info->id.id);
 
+#if defined(FAMILY_WINDOWS)
 	HANDLE file = CreateFile(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (file != INVALID_HANDLE_VALUE)
+#elif defined(FAMILY_UNIX)
+	int file = open(name, O_WRONLY);
+	if(file != 0)
+#endif
 	{
+#if defined(FAMILY_WINDOWS)
 		DWORD size_low = (DWORD)info->size;
 		DWORD size_high = (DWORD)(info->size >> 32);
 		HANDLE file_mapping = CreateFileMapping(file, NULL, PAGE_READWRITE, size_high, size_low, NULL);
 		if (file_mapping != NULL)
+#endif
 		{
+#if defined(FAMILY_WINDOWS)
 			void* dst = MapViewOfFileEx(file_mapping, FILE_MAP_WRITE, 0, 0, info->size, NULL);
+#elif defined(FAMILY_UNIX)
+			void* dst = mmap(NULL, info->size, PROT_READ, MAP_FILE, file, 0);
+#endif
 			if (dst != NULL)
 			{
 				memcpy(dst, space->base_ptr + info->id.id, info->size);
+#if defined(FAMILY_WINDOWS)
 				UnmapViewOfFile(dst);
+#elif defined(FAMILY_UNIX)
+				munmap(dst, info->size);
+#endif
 			}
 			else
 				res = STREAMER_RESULT_GENERIC_ERROR;
+#if defined(FAMILY_WINDOWS)
 			CloseHandle(file_mapping);
+#endif
 		}
+#if defined(FAMILY_WINDOWS)
 		else
 			res = STREAMER_RESULT_GENERIC_ERROR;
 		CloseHandle(file);
+#elif defined(FAMILY_UNIX)
+		close(file);
+#endif
 	}
 	else
 		res = STREAMER_RESULT_GENERIC_ERROR;
